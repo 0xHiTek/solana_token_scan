@@ -135,53 +135,122 @@ class SolanaTokenAnalyzer:
         }
     
     def search_x_mentions(self, contract_address: str, token_name: str = "", token_symbol: str = "") -> Dict:
-        """Search X.com for mentions of the token using Exa MCP"""
+        """Search X.com for mentions of the token using comprehensive search approach"""
         if not self.exa_client:
             return {"success": False, "error": "Exa client not initialized"}
         
         try:
-            # Create search queries
+            # Create comprehensive search queries to catch all mentions
             queries = []
             
-            # Add contract address query
-            queries.append(f'site:x.com "{contract_address}"')
+            # 1. Full contract address search
+            queries.append(contract_address)
             
-            # Add token name and symbol queries if available
-            if token_name and token_name != "Unknown":
-                queries.append(f'site:x.com "{token_name}" Solana token')
+            # 2. Shortened contract address variations (common on social media)
+            queries.append(contract_address[:12])  # First 12 characters
+            queries.append(contract_address[:8])   # First 8 characters
             
-            if token_symbol and token_symbol != "Unknown":
-                queries.append(f'site:x.com "${token_symbol}" Solana memecoin')
+            # 3. Contract with Solana context
+            queries.append(f"{contract_address} solana")
+            queries.append(f"{contract_address} pump")
+            
+            # 4. If we have token info, search for those too
+            if token_symbol and token_symbol not in ["Unknown", "UNKNOWN"]:
+                queries.append(f"{token_symbol} {contract_address[:8]}")
+                queries.append(f"${token_symbol} solana")
+                queries.append(f"${token_symbol} pump.fun")
+            
+            if token_name and token_name not in ["Unknown", "Unknown Token"] and len(token_name.split()) <= 3:
+                queries.append(f'"{token_name}" {contract_address[:8]}')
+                queries.append(f'"{token_name}" solana')
             
             all_results = []
             
             for query in queries:
                 try:
-                    # Use Exa to search
+                    st.info(f"🔍 Searching: {query[:50]}...")
+                    
+                    # Use broader search parameters
                     results = self.exa_client.search(
                         query=query,
-                        num_results=10,
-                        include_domains=["x.com", "twitter.com"]
+                        num_results=10,  # More results per query
+                        include_domains=["x.com", "twitter.com"],
+                        start_published_date="2023-01-01"  # Broader date range
                     )
                     
                     if results.results:
+                        st.success(f"✅ Found {len(results.results)} results for: {query[:30]}...")
                         all_results.extend(results.results)
-                        time.sleep(0.5)  # Rate limiting
+                    else:
+                        st.warning(f"⚠️ No results for: {query[:30]}...")
+                        
+                    time.sleep(0.5)  # Rate limiting
                 
                 except Exception as e:
-                    st.warning(f"Search query failed: {query} - {e}")
+                    st.error(f"❌ Search failed for '{query[:30]}...': {str(e)[:100]}")
                     continue
+            
+            # Remove duplicates based on URL
+            seen_urls = set()
+            unique_results = []
+            for result in all_results:
+                url = getattr(result, 'url', '')
+                if url and url not in seen_urls:
+                    seen_urls.add(url)
+                    unique_results.append(result)
+            
+            # Enhanced relevance scoring
+            def calculate_relevance(result):
+                title = getattr(result, 'title', '') or ""
+                text = getattr(result, 'text', '') or ""
+                content = (title + " " + text).lower()
+                
+                score = 0
+                
+                # Exact contract match gets highest score
+                if contract_address.lower() in content:
+                    score += 100
+                
+                # Partial contract matches
+                for length in [12, 8, 6]:
+                    if contract_address[:length].lower() in content:
+                        score += 50 - (12 - length) * 5
+                
+                # Token symbol matches
+                if token_symbol and token_symbol.lower() in content:
+                    score += 20
+                
+                # Token name matches
+                if token_name and token_name.lower() in content:
+                    score += 15
+                
+                # Crypto context keywords
+                crypto_keywords = ['pump', 'moon', 'solana', 'dex', 'trade', 'buy', 'sell', 'token', 'coin', 'crypto', 'gem']
+                for keyword in crypto_keywords:
+                    if keyword in content:
+                        score += 2
+                
+                return score
+            
+            # Sort by relevance score
+            unique_results.sort(key=calculate_relevance, reverse=True)
+            
+            # Take top results with some score threshold
+            relevant_results = [r for r in unique_results if calculate_relevance(r) > 0]
+            
+            st.success(f"🎯 Found {len(unique_results)} total results, {len(relevant_results)} relevant")
             
             return {
                 "success": True,
-                "total_mentions": len(all_results),
-                "results": all_results
+                "total_mentions": len(relevant_results),
+                "results": relevant_results[:10]  # Show more results
             }
             
         except Exception as e:
+            st.error(f"❌ Search system error: {str(e)}")
             return {"success": False, "error": str(e)}
     
-    def analyze_social_engagement(self, search_results: List) -> Dict:
+    def analyze_social_engagement(self, search_results: List, contract_address: str, token_symbol: str = "") -> Dict:
         """Analyze the social media engagement from search results"""
         if not search_results:
             return {
@@ -190,6 +259,37 @@ class SolanaTokenAnalyzer:
                 "total_mentions": 0,
                 "engagement_level": "None",
                 "risk_assessment": "Very High"
+            }
+        
+        # Filter results to only include genuinely relevant ones
+        relevant_results = []
+        for result in search_results:
+            title = getattr(result, 'title', '') or ""
+            text = getattr(result, 'text', '') or ""
+            content = (title + " " + text).lower()
+            
+            # Check if result actually mentions the token
+            is_token_related = (
+                contract_address.lower() in content or
+                contract_address[:12].lower() in content or
+                contract_address[:8].lower() in content or
+                (token_symbol and token_symbol.lower() in content and 
+                 any(word in content for word in ['pump', 'solana', 'token', 'coin', 'crypto', 'dex', 'trade']))
+            )
+            
+            if is_token_related:
+                relevant_results.append(result)
+        
+        # Use only relevant results for analysis
+        if not relevant_results:
+            return {
+                "engagement_score": 0,
+                "notable_accounts": [],
+                "total_mentions": 0,
+                "engagement_level": "None",
+                "risk_assessment": "Very High",
+                "filtered_mentions": len(search_results),
+                "relevant_mentions": 0
             }
         
         # Notable accounts patterns - major crypto influencers and exchanges
@@ -212,7 +312,7 @@ class SolanaTokenAnalyzer:
         notable_accounts = []
         engagement_indicators = []
         
-        for result in search_results:
+        for result in relevant_results:
             # Check for notable accounts with null safety
             title = getattr(result, 'title', '') or ""
             text = getattr(result, 'text', '') or ""
@@ -239,8 +339,8 @@ class SolanaTokenAnalyzer:
             elif any(word in content for word in negative_words):
                 engagement_indicators.append("negative")
         
-        # Calculate engagement score
-        base_score = min(len(search_results) * 10, 100)
+        # Calculate engagement score based on relevant results only
+        base_score = min(len(relevant_results) * 10, 100)
         notable_bonus = len(set(notable_accounts)) * 20
         engagement_score = min(base_score + notable_bonus, 100)
         
@@ -261,11 +361,13 @@ class SolanaTokenAnalyzer:
         return {
             "engagement_score": engagement_score,
             "notable_accounts": list(set(notable_accounts)),
-            "total_mentions": len(search_results),
+            "total_mentions": len(relevant_results),
             "engagement_level": engagement_level,
             "risk_assessment": risk_level,
             "positive_indicators": engagement_indicators.count("positive"),
-            "negative_indicators": engagement_indicators.count("negative")
+            "negative_indicators": engagement_indicators.count("negative"),
+            "filtered_mentions": len(search_results),
+            "relevant_mentions": len(relevant_results)
         }
     
     def generate_investment_recommendation(self, token_data: Dict, price_data: Dict, social_data: Dict) -> Dict:
@@ -728,7 +830,11 @@ def main():
             
             if social_results.get("success"):
                 search_data = social_results.get("results", [])
-                engagement_analysis = analyzer.analyze_social_engagement(search_data)
+                engagement_analysis = analyzer.analyze_social_engagement(
+                    search_data, 
+                    contract_address, 
+                    token_info.get("symbol", "")
+                )
                 
                 # Display social metrics
                 col1, col2, col3, col4 = st.columns(4)
@@ -745,6 +851,16 @@ def main():
                 with col4:
                     st.metric("Risk Level", engagement_analysis["risk_assessment"])
                 
+                # Show filtering information if available
+                if "filtered_mentions" in engagement_analysis and "relevant_mentions" in engagement_analysis:
+                    filtered_count = engagement_analysis["filtered_mentions"]
+                    relevant_count = engagement_analysis["relevant_mentions"]
+                    
+                    if filtered_count > relevant_count:
+                        st.info(f"📊 Analysis filtered {filtered_count} search results → {relevant_count} token-specific mentions")
+                    elif relevant_count > 0:
+                        st.success(f"✅ All {relevant_count} search results were relevant to this token")
+                
                 # Show notable accounts
                 if engagement_analysis["notable_accounts"]:
                     st.subheader("🌟 Notable Accounts Promoting")
@@ -753,35 +869,96 @@ def main():
                 else:
                     st.warning("❌ No notable accounts found promoting this token")
                 
-                # Show recent mentions
-                if search_data:
-                    st.markdown("""
+                # Show comprehensive search results
+                if search_data and len(search_data) > 0:
+                    st.markdown(f"""
                     <div style="margin: 2rem 0;">
                         <h3 style="color: #00ff41; font-family: 'Courier New', monospace; text-shadow: 0 0 10px rgba(0, 255, 65, 0.4);">
-                            🐦 RECENT X.COM MENTIONS
+                            🐦 X.COM ANALYSIS ({len(search_data)} RESULTS FOUND)
                         </h3>
                     </div>
                     """, unsafe_allow_html=True)
                     
-                    for i, result in enumerate(search_data[:5]):  # Show top 5
-                        # Safely get title and text
-                        title = getattr(result, 'title', '') or f"Mention {i+1}"
+                    # Calculate relevance for each result
+                    def get_relevance_info(result, contract_addr, token_sym):
+                        title = getattr(result, 'title', '') or ""
+                        text = getattr(result, 'text', '') or ""
+                        content = (title + " " + text).lower()
+                        
+                        score = 0
+                        relevance_reasons = []
+                        
+                        if contract_addr.lower() in content:
+                            score += 100
+                            relevance_reasons.append("Full contract address")
+                        elif contract_addr[:12].lower() in content:
+                            score += 75
+                            relevance_reasons.append("Contract address (12 chars)")
+                        elif contract_addr[:8].lower() in content:
+                            score += 50
+                            relevance_reasons.append("Contract address (8 chars)")
+                        
+                        if token_sym and token_sym not in ["Unknown", "UNKNOWN"] and token_sym.lower() in content:
+                            score += 20
+                            relevance_reasons.append(f"Token symbol ({token_sym})")
+                        
+                        crypto_words = ['pump', 'moon', 'solana', 'dex', 'trade', 'buy', 'sell', 'token', 'coin']
+                        found_words = [w for w in crypto_words if w in content]
+                        if found_words:
+                            score += len(found_words) * 2
+                            relevance_reasons.append(f"Crypto context: {', '.join(found_words[:3])}")
+                        
+                        return score, relevance_reasons
+                    
+                    for i, result in enumerate(search_data):
+                        # Safely get result data
+                        title = getattr(result, 'title', '') or f"X.com Post {i+1}"
                         text = getattr(result, 'text', '') or "No content available"
                         url = getattr(result, 'url', '') or "No URL available"
                         
-                        # Truncate title for display
-                        display_title = title[:100] + "..." if len(title) > 100 else title
+                        # Calculate relevance
+                        score, reasons = get_relevance_info(result, contract_address, token_info.get("symbol", ""))
                         
-                        with st.expander(f"🔍 {display_title}"):
+                        # Determine icon and color based on score
+                        if score >= 75:
+                            icon = "🎯"
+                            relevance_color = "#2ea043"  # Green
+                            relevance_text = "HIGHLY RELEVANT"
+                        elif score >= 20:
+                            icon = "🔍"
+                            relevance_color = "#f59e0b"  # Yellow
+                            relevance_text = "MODERATELY RELEVANT"
+                        else:
+                            icon = "📄"
+                            relevance_color = "#6b7280"  # Gray
+                            relevance_text = "POTENTIALLY RELEVANT"
+                        
+                        # Truncate title for display
+                        display_title = title[:80] + "..." if len(title) > 80 else title
+                        
+                        with st.expander(f"{icon} {display_title} (Score: {score})"):
                             st.markdown(f"""
                             <div class="terminal-text">
-                                <p><strong>URL:</strong> {url}</p>
-                                <p><strong>Content:</strong> {text[:500]}{"..." if len(text) > 500 else ""}</p>
+                                <p><strong>🔗 URL:</strong> <a href="{url}" target="_blank" style="color: #58a6ff;">{url}</a></p>
+                                <p><strong>📊 Relevance Score:</strong> <span style="color: {relevance_color}; font-weight: bold;">{score} - {relevance_text}</span></p>
+                                <p><strong>🎯 Match Reasons:</strong> {', '.join(reasons) if reasons else 'General crypto context'}</p>
+                                <p><strong>📝 Content Preview:</strong> {text[:400]}{"..." if len(text) > 400 else ""}</p>
                             </div>
                             """, unsafe_allow_html=True)
                             
                             if hasattr(result, 'published_date') and result.published_date:
-                                st.write(f"**Date:** {result.published_date}")
+                                st.markdown(f"**📅 Published:** {result.published_date}")
+                else:
+                    st.markdown("""
+                    <div class="terminal-text" style="border-color: #f87171; text-align: center;">
+                        <p style="color: #f87171;">❌ NO MENTIONS FOUND IN COMPREHENSIVE SEARCH</p>
+                        <p style="color: #fcd34d;">This indicates the token likely has:</p>
+                        <p style="color: #fcd34d;">• Zero social media presence</p>
+                        <p style="color: #fcd34d;">• Very recent launch (less than 24h)</p>
+                        <p style="color: #fcd34d;">• Private/stealth distribution</p>
+                        <p style="color: #00ff41;">Check search logs above for detailed query results</p>
+                    </div>
+                    """, unsafe_allow_html=True)
                 
             else:
                 st.error(f"❌ Social media search failed: {social_results.get('error', 'Unknown error')}")
@@ -789,7 +966,9 @@ def main():
                     "engagement_score": 0,
                     "notable_accounts": [],
                     "total_mentions": 0,
-                    "risk_assessment": "Very High"
+                    "risk_assessment": "Very High",
+                    "filtered_mentions": 0,
+                    "relevant_mentions": 0
                 }
         
         # Generate investment recommendation
